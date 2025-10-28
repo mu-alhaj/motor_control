@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -56,6 +57,36 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+#define adc_filter_len 10
+
+uint32_t poten_value = 0;
+uint32_t poten_raw = 0;
+uint8_t do_filter = 0;
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+	poten_raw = HAL_ADC_GetValue(&hadc1);
+	// to avoid filtering in interrupt context.
+	do_filter = 1;
+}
+
+// filter and normalize
+void poten_filter_normalize()
+{
+  static uint32_t buff[adc_filter_len]= {0};
+  static uint8_t i = 0;
+  static uint32_t sum = 0;
+
+	// filter
+	sum -=buff[i];
+	buff[i] = poten_raw;
+	sum += buff[i];
+	i = (i + 1) % adc_filter_len;
+	uint32_t avg = sum/adc_filter_len;
+
+	// normalize
+	poten_value = avg * 1023 / 4095;
+}
 /* USER CODE END 0 */
 
 /**
@@ -88,14 +119,21 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  HAL_ADC_Start_IT(&hadc1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  if( do_filter )
+	  {
+		  poten_filter_normalize();
+		  do_filter = 0;
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
