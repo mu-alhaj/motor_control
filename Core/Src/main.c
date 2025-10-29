@@ -63,11 +63,29 @@ uint32_t poten_value = 0;
 uint32_t poten_raw = 0;
 uint8_t do_filter = 0;
 
+uint32_t bus_raw = 0;
+float bus_voltage = 0;
+
+
+#define ADC_FULL_SCALE     4095.0f
+#define VDDA_VOLTS         3.3f         // or measure via VREFINT for precision
+#define DIV_RATIO          (18.0f / (169.0f + 18.0f))   // ≈ 0.01052
+
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
-	poten_raw = HAL_ADC_GetValue(&hadc1);
-	// to avoid filtering in interrupt context.
-	do_filter = 1;
+	if ( hadc == &hadc1 )
+	{
+		poten_raw = HAL_ADC_GetValue(&hadc1);
+		// to avoid filtering in interrupt context.
+		do_filter = 1;
+	}
+	else if( hadc == &hadc2 )
+	{
+		bus_raw = HAL_ADC_GetValue(&hadc2);
+		bus_voltage = (bus_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+		bus_voltage = bus_voltage/DIV_RATIO;
+	}
 }
 
 // filter and normalize
@@ -120,9 +138,14 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
+  // start adc for potentiometer
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADC_Start_IT(&hadc1);
+  // start adc for bus voltage
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+  HAL_ADC_Start_IT(&hadc2);
   /* USER CODE END 2 */
 
   /* Infinite loop */

@@ -1,0 +1,13 @@
+# STM32CubeIDE build output
+Debug/
+Release/
+*.elf
+*.map
+*.list
+*.o
+*.su
+*.cyclo
+
+# Optional: exclude user-generated binaries
+*.bin
+*.hex
