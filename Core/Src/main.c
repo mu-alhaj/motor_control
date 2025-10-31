@@ -276,7 +276,6 @@ void commutate()
 		 * 			STEP 2  is good example for rising (C on the way up)
 		 * 			- C was low - turn it off
 		 * 			- A was Off - turn it low
-		 * 			- enable timer on C while it is off, to be enabled in the next step.
 		 * */
 
 		// enable low phase, that was off the previous step.
@@ -284,11 +283,6 @@ void commutate()
 
 		// disable off phase, that was low the previous step.
 		odOffPort[powerStep]->BRR  = odOffPin[powerStep];
-
-		// prepare the off phase timer for the next step
-
-		//TIM1->CCER |= (ccOff[powerStep]); // enable capture/compare
-		//TIM1->DIER |= (diOff[powerStep]); // enable dma
 	}
 	else
 	{
@@ -301,21 +295,15 @@ void commutate()
 		 * 			STEP 3 is good example for falling (B on the way down)
 		 * 			- B was high - turn it off
 		 * 			- C was off  - turn it high
-		 * 			- disable timer for phase B since it it off now
 		 * */
 
 		// disable off phase, that was high before.
-		//odOffPort[powerStep]->BRR = odOffPin[powerStep];
 		TIM1->CCER &= ~(ccOff[powerStep]);
 		TIM1->DIER &= ~(diOff[powerStep]);
 
 		// enable high phase, that was off before.
-		//odHighPort[powerStep]->BSRR = odHighPin[powerStep];
 		TIM1->CCER |= (ccHigh[powerStep]); // enable capture/compare
 		TIM1->DIER |= (diHigh[powerStep]); // enable dma
-
-		// disable timer on the off phase, that was high(pwm) before
-
 	}
 
 	// delay of 2 us
