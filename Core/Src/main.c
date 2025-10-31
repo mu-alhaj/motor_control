@@ -68,23 +68,37 @@ uint8_t do_filter = 0;
 uint32_t bus_raw = 0;
 float bus_voltage = 0;
 
+uint16_t bemf_a_raw = 0;
+uint16_t bemf_b_raw = 0;
+uint16_t bemf_c_raw = 0;
+
 
 #define ADC_FULL_SCALE     4095.0f
 #define VDDA_VOLTS         3.3f         // or measure via VREFINT for precision
 #define DIV_RATIO          (18.0f / (169.0f + 18.0f))   // ≈ 0.01052
 
+uint16_t adc1_buffer[2] = {0};
+uint16_t adc2_buffer[3] = {0};
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	if ( hadc == &hadc1 )
 	{
-		poten_raw = HAL_ADC_GetValue(&hadc1);
+		// CH11: POTENTIOMETER
+		// CH14: BEMFC
+		poten_raw = adc1_buffer[0];
+		bemf_c_raw = adc1_buffer[1];
 		// to avoid filtering in interrupt context.
 		do_filter = 1;
 	}
 	else if( hadc == &hadc2 )
 	{
-		bus_raw = HAL_ADC_GetValue(&hadc2);
+		// CH1: BUS VOLTAGE
+		// CH5: BEMFB
+		// CH17: BEMFA
+		bus_raw = adc2_buffer[0];
+		bemf_b_raw = adc2_buffer[1];
+		bemf_a_raw = adc2_buffer[2];
 		bus_voltage = (bus_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
 		bus_voltage = bus_voltage/DIV_RATIO;
 	}
@@ -376,10 +390,10 @@ int main(void)
   /* USER CODE BEGIN 2 */
   // start adc for potentiometer
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-  HAL_ADC_Start_IT(&hadc1);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_buffer, 2);
   // start adc for bus voltage
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
-  HAL_ADC_Start_IT(&hadc2);
+  HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc2_buffer, 3);
 
 
   resetImrFlags = EXTI->IMR1;

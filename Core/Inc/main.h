@@ -61,6 +61,12 @@ void Error_Handler(void);
 #define OD_A_GPIO_Port GPIOC
 #define BUS_V_Pin GPIO_PIN_0
 #define BUS_V_GPIO_Port GPIOA
+#define BEMF_A_Pin GPIO_PIN_4
+#define BEMF_A_GPIO_Port GPIOA
+#define BEMF_B_Pin GPIO_PIN_4
+#define BEMF_B_GPIO_Port GPIOC
+#define BEMF_C_Pin GPIO_PIN_11
+#define BEMF_C_GPIO_Port GPIOB
 #define POT_IN_Pin GPIO_PIN_12
 #define POT_IN_GPIO_Port GPIOB
 #define OD_C_Pin GPIO_PIN_15
