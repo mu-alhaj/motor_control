@@ -113,7 +113,7 @@ void poten_filter_normalize()
 
 
 #define dmaPulse  1
-const uint16_t dmaPulseReload = 1024;
+const uint16_t dmaPulseReload = 1023;
 volatile uint16_t dmaBuffer[dmaPulse] = {0};
 volatile uint16_t resolution = dmaPulse * dmaPulseReload;
 
@@ -203,33 +203,58 @@ const uint16_t odOffPin[6] = {
 
 // G4 reference manual : TIMx capture/compare enable register (TIMx_CCER)(x = 1, 8, 20)
 // A CC1E = 0, B CC2E = 4, C CC3E = 8
+// BACBAC
 const uint32_t ccOff[6] = {
-		1<<4,
-		1<<0,
-		1<<8,
-		1<<4,
-		1<<0,
-		1<<8
+		TIM_CCER_CC2E,
+		TIM_CCER_CC1E,
+		TIM_CCER_CC3E,
+		TIM_CCER_CC2E,
+		TIM_CCER_CC1E,
+		TIM_CCER_CC3E
+};
+
+// G4 reference manual : TIMx DMA/interrupt enable register (TIMx_DIER)(x = 1, 8, 20)
+// A CC1DE = 9, B CC2DE = 10, C CC3DE = 11
+// BACBAC
+const uint32_t diOff[6] = {
+		TIM_DIER_CC2DE,
+		TIM_DIER_CC1DE,
+		TIM_DIER_CC3DE,
+		TIM_DIER_CC2DE,
+		TIM_DIER_CC1DE,
+		TIM_DIER_CC3DE
 };
 
 // G4 reference manual : TIMx capture/compare enable register (TIMx_CCER)(x = 1, 8, 20)
-// A CC1DE = 9, B CC1DE = 10, C CC1DE = 11
-const uint32_t diOff[6] = {
-		1<<10,
-		1<<9,
-		1<<11,
-		1<<10,
-		1<<9,
-		1<<11,
+// A CC1E = 0, B CC2E = 4, C CC3E = 8
+// BACBAC
+const uint32_t ccHigh[6] = {
+		TIM_CCER_CC1E,
+		TIM_CCER_CC2E,
+		TIM_CCER_CC2E,
+		TIM_CCER_CC3E,
+		TIM_CCER_CC3E,
+		TIM_CCER_CC1E
+};
+
+// G4 reference manual : TIMx DMA/interrupt enable register (TIMx_DIER)(x = 1, 8, 20)
+// A CC1DE = 9, B CC2DE = 10, C CC3DE = 11
+// BACBAC
+const uint32_t diHigh[6] = {
+		TIM_DIER_CC1DE,
+		TIM_DIER_CC2DE,
+		TIM_DIER_CC2DE,
+		TIM_DIER_CC3DE,
+		TIM_DIER_CC3DE,
+		TIM_DIER_CC1DE
 };
 
 uint8_t do_commutate = 0;
 void commutate()
 {
 
-
+	__disable_irq();
 	// clear wake up interrupts
-	EXTI->EMR1 = 0;
 
 	// disable zero-crossing interrupts
 	// TODO: disable zc interrupts
@@ -242,58 +267,68 @@ void commutate()
 
 	if (risig[powerStep])
 	{
-	// if zc rising
-	// 		TODO: enable zc rising interrupt ( since we are expecting this phase to be rising next step)
-	// 		enable OD low
+		/*
+		 * step		0	1	2	3	4	5
+		 * H		A 	B  	B	C	C	A
+		 * O		B 	A 	C 	B 	A	C
+		 * L		C	C 	A 	A 	B  	B
+		 *
+		 * 			STEP 2  is good example for rising (C on the way up)
+		 * 			- C was low - turn it off
+		 * 			- A was Off - turn it low
+		 * 			- enable timer on C while it is off, to be enabled in the next step.
+		 * */
+
+		// enable low phase, that was off the previous step.
 		odLowPort[powerStep]->BSRR = odLowPin[powerStep];
+
+		// disable off phase, that was low the previous step.
+		odOffPort[powerStep]->BRR  = odOffPin[powerStep];
+
+		// prepare the off phase timer for the next step
+
+		//TIM1->CCER |= (ccOff[powerStep]); // enable capture/compare
+		//TIM1->DIER |= (diOff[powerStep]); // enable dma
 	}
 	else
 	{
-	// else
-	// 		TODO: enable zc falling interrupt (since we are expecting this phase to be falling next step)
-	// 		and we need to know when that happens.
-	//		enable OD high
-		odHighPort[powerStep]->BSRR = odHighPin[powerStep];
-	}
+		/*
+		 * step		0	1	2	3	4	5
+		 * H		A 	B  	B	C	C	A
+		 * O		B 	A 	C 	B 	A	C
+		 * L		C	C 	A 	A 	B  	B
+		 *
+		 * 			STEP 3 is good example for falling (B on the way down)
+		 * 			- B was high - turn it off
+		 * 			- C was off  - turn it high
+		 * 			- disable timer for phase B since it it off now
+		 * */
 
-	// disable OD off
-	odOffPort[powerStep]->BRR = odOffPin[powerStep];
-
-	if(!risig[powerStep])
-	{
-	// if zc falling
-	//		disable cc on TIM1
-	/*
-	 *  step	0	1	2	3	4	5
-	 * 	H		A 	B 	B	C	C	A
-	 * 	O		B 	A 	C 	B 	A	C
-	 * 	L		C	C 	A 	A 	B 	B
-	 *
-	 *  in step 1 A is off and it is falling, but it was high the step before.
-	 *  that is why we need to disable cc so the no pwm is going on there, the pin was already disabled the step before.
-	 * */
+		// disable off phase, that was high before.
+		//odOffPort[powerStep]->BRR = odOffPin[powerStep];
 		TIM1->CCER &= ~(ccOff[powerStep]);
-	// 		disable dma
 		TIM1->DIER &= ~(diOff[powerStep]);
+
+		// enable high phase, that was off before.
+		//odHighPort[powerStep]->BSRR = odHighPin[powerStep];
+		TIM1->CCER |= (ccHigh[powerStep]); // enable capture/compare
+		TIM1->DIER |= (diHigh[powerStep]); // enable dma
+
+		// disable timer on the off phase, that was high(pwm) before
+
 	}
-	else
-	{
-	// else
-	//		enable cc
-		TIM1->CCER |= (ccOff[powerStep]);
-	// 		enable dma
-		TIM1->DIER |=(diOff[powerStep]);
-	}
+
 	// delay of 2 us
 	TIM7->CNT = 0;
 	// HCLK is 170 MHz, meaning 170 ticks a us.
 	while(TIM7->CNT < 340);
 
 	// enable wake up interrupts
-	EXTI->EMR1 = resetImrFlags;
 
 	// reset tim17 for pumb motor.
 	TIM17->CNT = 0;
+
+	__enable_irq();
 }
 
 // TODO: zero-crossing detection.
@@ -386,7 +421,7 @@ int main(void)
 
   // set up tim 17 to pumb up the commutation.
   // klc is 170MHz , 170000 ticks a ms, prescaler set to 170000/3
-  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*50);
+  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*3);
   HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1);
 
 
