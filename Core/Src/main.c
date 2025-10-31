@@ -19,6 +19,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dma.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -105,6 +107,211 @@ void poten_filter_normalize()
 	// normalize
 	poten_value = avg * 1023 / 4095;
 }
+
+// for info check:
+//https://github.com/guser210/ESC/blob/master/Code/ESC_V1.1/cpp/src/main.cpp
+
+
+#define dmaPulse  1
+const uint16_t dmaPulseReload = 1024;
+volatile uint16_t dmaBuffer[dmaPulse] = {0};
+volatile uint16_t resolution = dmaPulse * dmaPulseReload;
+
+uint16_t motorSpeed = 0;
+uint16_t motorSpeedCurrent = 0;
+
+void setDutyCycle(uint16_t dc)
+{
+	if (dc > resolution) dc = resolution;
+
+	dmaBuffer[0] = dc;
+	TIM1->CCR1 = dc;
+}
+
+volatile uint32_t resetImrFlags = 0;
+volatile uint8_t powerStep = 0;
+
+/*
+ * step		0	1	2	3	4	5
+ * H		A 	B -	B	C	C	A
+			  /   	  \
+ * O		B 	A 	C 	B 	A	C
+						  \
+ * L		C	C 	A 	A 	B -	B
+ * */
+
+// define off phase rising array
+// B will rise, A will fall, C will rise ...
+const uint8_t risig[6] = {1,0,1,0,1,0};
+
+// odLow port
+GPIO_TypeDef *odLowPort[6] = {
+		OD_C_GPIO_Port,
+		OD_C_GPIO_Port,
+		OD_A_GPIO_Port,
+		OD_A_GPIO_Port,
+		OD_B_GPIO_Port,
+		OD_B_GPIO_Port
+};
+// odLow pin
+const uint16_t odLowPin[6] = {
+		OD_C_Pin,
+		OD_C_Pin,
+		OD_A_Pin,
+		OD_A_Pin,
+		OD_B_Pin,
+		OD_B_Pin
+};
+
+// odHigh port
+GPIO_TypeDef *odHighPort[6] = {
+		OD_A_GPIO_Port,
+		OD_B_GPIO_Port,
+		OD_B_GPIO_Port,
+		OD_C_GPIO_Port,
+		OD_C_GPIO_Port,
+		OD_A_GPIO_Port
+};
+// odHigh pin
+const uint16_t odHighPin[6] = {
+		OD_A_Pin,
+		OD_B_Pin,
+		OD_B_Pin,
+		OD_C_Pin,
+		OD_C_Pin,
+		OD_A_Pin
+};
+
+// odOff port
+GPIO_TypeDef *odOffPort[6] = {
+		OD_B_GPIO_Port,
+		OD_A_GPIO_Port,
+		OD_C_GPIO_Port,
+		OD_B_GPIO_Port,
+		OD_A_GPIO_Port,
+		OD_C_GPIO_Port
+};
+// odOff pin
+const uint16_t odOffPin[6] = {
+		OD_B_Pin,
+		OD_A_Pin,
+		OD_C_Pin,
+		OD_B_Pin,
+		OD_A_Pin,
+		OD_C_Pin
+};
+
+// G4 reference manual : TIMx capture/compare enable register (TIMx_CCER)(x = 1, 8, 20)
+// A CC1E = 0, B CC2E = 4, C CC3E = 8
+const uint32_t ccOff[6] = {
+		1<<4,
+		1<<0,
+		1<<8,
+		1<<4,
+		1<<0,
+		1<<8
+};
+
+// G4 reference manual : TIMx capture/compare enable register (TIMx_CCER)(x = 1, 8, 20)
+// A CC1DE = 9, B CC1DE = 10, C CC1DE = 11
+const uint32_t diOff[6] = {
+		1<<10,
+		1<<9,
+		1<<11,
+		1<<10,
+		1<<9,
+		1<<11,
+};
+
+uint8_t do_commutate = 0;
+void commutate()
+{
+
+
+	// clear wake up interrupts
+	EXTI->EMR1 = 0;
+
+	// disable zero-crossing interrupts
+	// TODO: disable zc interrupts
+
+	// clear zc pending interrupts
+	// TODO: clear pending interrupts
+
+	// got to next step
+	powerStep = (powerStep + 1)%6;
+
+	if (risig[powerStep])
+	{
+	// if zc rising
+	// 		TODO: enable zc rising interrupt ( since we are expecting this phase to be rising next step)
+	// 		enable OD low
+		odLowPort[powerStep]->BSRR = odLowPin[powerStep];
+	}
+	else
+	{
+	// else
+	// 		TODO: enable zc falling interrupt (since we are expecting this phase to be falling next step)
+	// 		and we need to know when that happens.
+	//		enable OD high
+		odHighPort[powerStep]->BSRR = odHighPin[powerStep];
+	}
+
+	// disable OD off
+	odOffPort[powerStep]->BRR = odOffPin[powerStep];
+
+	if(!risig[powerStep])
+	{
+	// if zc falling
+	//		disable cc on TIM1
+	/*
+	 *  step	0	1	2	3	4	5
+	 * 	H		A 	B 	B	C	C	A
+	 * 	O		B 	A 	C 	B 	A	C
+	 * 	L		C	C 	A 	A 	B 	B
+	 *
+	 *  in step 1 A is off and it is falling, but it was high the step before.
+	 *  that is why we need to disable cc so the no pwm is going on there, the pin was already disabled the step before.
+	 * */
+		TIM1->CCER &= ~(ccOff[powerStep]);
+	// 		disable dma
+		TIM1->DIER &= ~(diOff[powerStep]);
+	}
+	else
+	{
+	// else
+	//		enable cc
+		TIM1->CCER |= (ccOff[powerStep]);
+	// 		enable dma
+		TIM1->DIER |=(diOff[powerStep]);
+	}
+	// delay of 2 us
+	TIM7->CNT = 0;
+	// HCLK is 170 MHz, meaning 170 ticks a us.
+	while(TIM7->CNT < 340);
+
+	// enable wake up interrupts
+	EXTI->EMR1 = resetImrFlags;
+
+	// reset tim17 for pumb motor.
+	TIM17->CNT = 0;
+}
+
+// TODO: zero-crossing detection.
+
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	if( (htim == &htim17) && (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) )
+	{
+		if( motorSpeedCurrent > 0 )
+		{
+			if (do_commutate == 0)
+			{
+				do_commutate = 1;
+			}
+		}
+	}
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -136,9 +343,13 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
+  MX_TIM1_Init();
+  MX_TIM7_Init();
+  MX_TIM17_Init();
   /* USER CODE BEGIN 2 */
   // start adc for potentiometer
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
@@ -146,6 +357,39 @@ int main(void)
   // start adc for bus voltage
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
   HAL_ADC_Start_IT(&hadc2);
+
+
+  resetImrFlags = EXTI->IMR1;
+  //TODO: reset the zc pins so it is turned off.
+
+  if( HAL_TIM_Base_Start(&htim7) != HAL_OK)
+	  Error_Handler();
+  if( HAL_TIM_Base_Start(&htim1) != HAL_OK)
+	  Error_Handler();
+
+  TIM1->CCR1 = 0;
+  TIM1->CCR2 = 0;
+  TIM1->CCR3 = 0;
+
+
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+
+  HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_3);
+
+  HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_1, (uint32_t*)dmaBuffer, dmaPulse);
+  HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_2, (uint32_t*)dmaBuffer, dmaPulse);
+  HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_3, (uint32_t*)dmaBuffer, dmaPulse);
+
+  // set up tim 17 to pumb up the commutation.
+  // klc is 170MHz , 170000 ticks a ms, prescaler set to 170000/3
+  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*50);
+  HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1);
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -156,6 +400,26 @@ int main(void)
 	  {
 		  poten_filter_normalize();
 		  do_filter = 0;
+		  motorSpeed = poten_value;
+
+		  if (motorSpeed != motorSpeedCurrent)
+		  {
+			  if ( (motorSpeed - motorSpeedCurrent) > 20)
+			  {
+				  motorSpeedCurrent += 20;
+			  }
+			  else
+			  {
+				  motorSpeedCurrent = motorSpeed;
+			  }
+
+			  setDutyCycle(motorSpeedCurrent);
+		  }
+	  }
+	  if ( do_commutate )
+	  {
+		  commutate();
+		  do_commutate = 0;
 	  }
     /* USER CODE END WHILE */
 
