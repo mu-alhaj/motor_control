@@ -409,7 +409,7 @@ int main(void)
 
   // set up tim 17 to pumb up the commutation.
   // klc is 170MHz , 170000 ticks a ms, prescaler set to 170000/3
-  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*3);
+  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*5);
   HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1);
 
 
