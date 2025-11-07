@@ -83,10 +83,15 @@ void Error_Handler(void);
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
 #define TCK_GPIO_Port GPIOA
+#define BTN_Pin GPIO_PIN_10
+#define BTN_GPIO_Port GPIOC
+#define BTN_EXTI_IRQn EXTI15_10_IRQn
 #define UART_TX_Pin GPIO_PIN_3
 #define UART_TX_GPIO_Port GPIOB
 #define UART_RX_Pin GPIO_PIN_4
 #define UART_RX_GPIO_Port GPIOB
+#define GPIO_BEMF_Pin GPIO_PIN_5
+#define GPIO_BEMF_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

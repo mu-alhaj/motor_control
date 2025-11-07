@@ -72,10 +72,19 @@ uint16_t bemf_a_raw = 0;
 uint16_t bemf_b_raw = 0;
 uint16_t bemf_c_raw = 0;
 
+float bemf_a_voltage = 0;
+float bemf_b_voltage = 0;
+float bemf_c_voltage = 0;
+
+float max_a = 0;
+float max_b = 0;
+float max_c = 0;
+
 
 #define ADC_FULL_SCALE     4095.0f
 #define VDDA_VOLTS         3.3f         // or measure via VREFINT for precision
 #define DIV_RATIO          (18.0f / (169.0f + 18.0f))   // ≈ 0.01052
+#define BEMF_DIV_RATIO	   (2.2f / (10.0f + 2.2f))
 
 uint16_t adc1_buffer[2] = {0};
 uint16_t adc2_buffer[3] = {0};
@@ -88,7 +97,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		// CH14: BEMFC
 		poten_raw = adc1_buffer[0];
 		bemf_c_raw = adc1_buffer[1];
+		bemf_c_voltage =(bemf_c_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+		bemf_c_voltage = bemf_c_voltage/BEMF_DIV_RATIO;
 		// to avoid filtering in interrupt context.
+		if(bemf_c_voltage > max_c)
+			max_c = bemf_c_voltage;
 		do_filter = 1;
 	}
 	else if( hadc == &hadc2 )
@@ -97,10 +110,20 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		// CH5: BEMFB
 		// CH17: BEMFA
 		bus_raw = adc2_buffer[0];
-		bemf_b_raw = adc2_buffer[1];
-		bemf_a_raw = adc2_buffer[2];
 		bus_voltage = (bus_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
 		bus_voltage = bus_voltage/DIV_RATIO;
+
+		bemf_b_raw = adc2_buffer[1];
+		bemf_b_voltage =(bemf_b_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+		bemf_b_voltage = bemf_b_voltage/BEMF_DIV_RATIO;
+		if(bemf_b_voltage > max_b)
+					max_b = bemf_b_voltage;
+
+		bemf_a_raw = adc2_buffer[2];
+		bemf_a_voltage =(bemf_a_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+		bemf_a_voltage = bemf_a_voltage/BEMF_DIV_RATIO;
+		if(bemf_a_voltage > max_a)
+					max_a = bemf_a_voltage;
 	}
 }
 
@@ -337,18 +360,38 @@ void commutate()
 
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 {
-	if( (htim == &htim17) && (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) )
+	if( (htim->Instance == TIM17) && (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) )
 	{
 		if( motorSpeedCurrent > 0 )
 		{
-			if (do_commutate == 0)
-			{
-				do_commutate = 1;
-			}
+				//commutate();
+				HAL_TIM_OC_Stop_IT(&htim17, TIM_CHANNEL_1); // stop one-shot
 		}
 	}
 }
 
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if(htim->Instance == TIM6)
+    {
+        // Example: forced commutation for motor startup
+        if(motorSpeedCurrent > 0 && motorSpeedCurrent < 150) // startup threshold
+        {
+            commutate(); // move one step
+        }
+    }
+}
+int _write(int file, char *ptr, int len)
+{
+  (void)file;
+  int DataIdx;
+
+  for (DataIdx = 0; DataIdx < len; DataIdx++)
+  {
+    ITM_SendChar(*ptr++);
+  }
+  return len;
+}
 /* USER CODE END 0 */
 
 /**
@@ -387,6 +430,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM7_Init();
   MX_TIM17_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   // start adc for potentiometer
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
@@ -421,16 +465,27 @@ int main(void)
   HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_2, (uint32_t*)dmaBuffer, dmaPulse);
   HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_3, (uint32_t*)dmaBuffer, dmaPulse);
 
-  // set up tim 17 to pumb up the commutation.
-  // klc is 170MHz , 170000 ticks a ms, prescaler set to 170000/3
-  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, 3*5);
-  HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1);
+  // set up tim X to pumb up the commutation. 10 ms timer.
+  HAL_TIM_Base_Start_IT(&htim6);
+
+
+  // tim17 us timer to take time between zc.
+  __HAL_TIM_SET_COUNTER(&htim17, 0);
+  HAL_TIM_Base_Start(&htim17);  // start free-running timer
+
 
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  float bemf = 0;
+  float bemf_prev = 0;
+  float bemf_filtered = 0;
+  float half_bus = bus_voltage/2.0f;
+  uint8_t zc_detected = 0;
+  uint32_t zc_time_prev = 0;   // previous zero-crossing time
+  uint32_t zc_period = 0;      // time between zero crossings
   while (1)
   {
 	  if( do_filter )
@@ -453,11 +508,62 @@ int main(void)
 			  setDutyCycle(motorSpeedCurrent);
 		  }
 	  }
+
+	  switch(powerStep)
+	  {
+		  case 0: bemf = bemf_b_voltage; break;
+		  case 1: bemf = bemf_a_voltage; break;
+		  case 2: bemf = bemf_c_voltage; break;
+		  case 3: bemf = bemf_b_voltage; break;
+		  case 4: bemf = bemf_a_voltage; break;
+		  case 5: bemf = bemf_c_voltage; break;
+	  }
+
+	  bemf_filtered = 0.8f * bemf_filtered + 0.2f * bemf;
+	  if(zc_detected != 1)
+	  {
+		  if ((bemf_prev < half_bus) && (bemf_filtered >= half_bus))
+		  {
+			  // rising
+			  zc_detected = 1;
+		  }
+		  if ((bemf_prev > half_bus) && (bemf_filtered <= half_bus))
+		  {
+			  // falling
+			  zc_detected = 1;
+		  }
+	  }
+	  bemf_prev = bemf_filtered;
+
+	  if(zc_detected)
+	  {
+	      uint32_t zc_time = __HAL_TIM_GET_COUNTER(&htim17); // current time in µs
+
+	      // compute time between last zero crossing and current one
+	      if(zc_time_prev != 0)
+	      {
+	    	  // Compute period with overflow handling
+	    	  zc_period = (zc_time >= zc_time_prev) ? (zc_time - zc_time_prev)
+	    	                                          : (0xFFFF - zc_time_prev + zc_time + 1);
+	      }
+	      zc_time_prev = zc_time; // update for next ZC
+
+	      // start commutation slightly after zero crossing
+	      // for simplicity, we use half of the ZC period
+	      if(zc_period > 0)
+	      {
+	          uint32_t pulse = zc_time + (zc_period/2);
+	          __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, pulse & 0xFFFF);
+	          HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1); // enable OC interrupt
+	          zc_detected = 0;
+	      }
+	  }
+
 	  if ( do_commutate )
 	  {
 		  commutate();
-		  do_commutate = 0;
 	  }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
