@@ -157,6 +157,10 @@ volatile uint16_t resolution = dmaPulse * dmaPulseReload;
 uint16_t motorSpeed = 0;
 uint16_t motorSpeedCurrent = 0;
 
+
+uint16_t by_timer = 0;
+uint16_t by_crossing = 0;
+
 void setDutyCycle(uint16_t dc)
 {
 	if (dc > resolution) dc = resolution;
@@ -165,7 +169,6 @@ void setDutyCycle(uint16_t dc)
 	TIM1->CCR1 = dc;
 }
 
-volatile uint32_t resetImrFlags = 0;
 volatile uint8_t powerStep = 0;
 
 /*
@@ -287,6 +290,9 @@ const uint32_t diHigh[6] = {
 };
 
 uint8_t do_commutate = 0;
+#define BLANKING_US 5u
+uint32_t blanking_start = 0;
+uint8_t blanking_active = 0;
 void commutate()
 {
 
@@ -343,15 +349,12 @@ void commutate()
 		TIM1->DIER |= (diHigh[powerStep]); // enable dma
 	}
 
-	// delay of 2 us
-	TIM7->CNT = 0;
-	// HCLK is 170 MHz, meaning 170 ticks a us.
-	while(TIM7->CNT < 340);
+	// delay of 5 us
+	blanking_start = TIM7->CNT;
+	blanking_active = 1;
 
-	// enable wake up interrupts
-
-	// reset tim17 for pumb motor.
-	TIM17->CNT = 0;
+	// reset tim6 for pumb motor.
+	TIM6->CNT = 0;
 
 	__enable_irq();
 }
@@ -364,8 +367,9 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 	{
 		if( motorSpeedCurrent > 0 )
 		{
-				//commutate();
+				commutate();
 				HAL_TIM_OC_Stop_IT(&htim17, TIM_CHANNEL_1); // stop one-shot
+				by_crossing ++;
 		}
 	}
 }
@@ -375,9 +379,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if(htim->Instance == TIM6)
     {
         // Example: forced commutation for motor startup
-        if(motorSpeedCurrent > 0 && motorSpeedCurrent < 150) // startup threshold
+        if(motorSpeedCurrent > 0 && motorSpeedCurrent < 50) // startup threshold
         {
             commutate(); // move one step
+            by_timer ++;
         }
     }
 }
@@ -392,6 +397,9 @@ int _write(int file, char *ptr, int len)
   }
   return len;
 }
+uint16_t x = 0;
+uint32_t zc_period = 0;
+#define ZC_HYST 0.05f
 /* USER CODE END 0 */
 
 /**
@@ -432,6 +440,14 @@ int main(void)
   MX_TIM17_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+
+  /*
+   * TIM1 for pwm
+   * TIM17 us timer, waiting after zc detection to commutate.
+   * TIM7 170MHz, busy waits.
+   * TIM6 pumb up motor.
+   * */
+
   // start adc for potentiometer
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc1_buffer, 2);
@@ -440,7 +456,6 @@ int main(void)
   HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc2_buffer, 3);
 
 
-  resetImrFlags = EXTI->IMR1;
   //TODO: reset the zc pins so it is turned off.
 
   if( HAL_TIM_Base_Start(&htim7) != HAL_OK)
@@ -483,9 +498,13 @@ int main(void)
   float bemf_prev = 0;
   float bemf_filtered = 0;
   float half_bus = bus_voltage/2.0f;
+  float half_bus_l = 0;
+  float half_bus_h = 0;
   uint8_t zc_detected = 0;
   uint32_t zc_time_prev = 0;   // previous zero-crossing time
-  uint32_t zc_period = 0;      // time between zero crossings
+  //uint32_t zc_period = 0;      // time between zero crossings
+  uint8_t zc_pending = 0;
+  uint32_t zc_timer_start = 0;
   while (1)
   {
 	  if( do_filter )
@@ -519,19 +538,64 @@ int main(void)
 		  case 5: bemf = bemf_c_voltage; break;
 	  }
 
-	  bemf_filtered = 0.8f * bemf_filtered + 0.2f * bemf;
-	  if(zc_detected != 1)
+	  bemf_filtered = 0.7f * bemf_filtered + 0.3f * bemf;
+	  half_bus = bus_voltage/2.0f;
+	  half_bus_l = half_bus - ZC_HYST*bus_voltage;
+	  half_bus_h = half_bus + ZC_HYST*bus_voltage;
+
+	  // chill down for a bit after commutating.
+	  if (blanking_active) {
+	      uint32_t now = TIM7->CNT;
+	      uint32_t elapsed = (now >= blanking_start) ?
+	                         (now - blanking_start) :
+	                         (0xFFFF - blanking_start + now + 1);
+	      if (elapsed >= BLANKING_US * 170u)
+	          blanking_active = 0;
+	  }
+	  if (blanking_active)
+		  continue;
+
+	  /*
+			#define ZC_HYST 0.05f  // 5% of bus voltage
+
+			if ((bemf_prev < half_bus - ZC_HYST*bus_voltage) &&
+			(bemf_filtered >= half_bus + ZC_HYST*bus_voltage))
+	   * */
+
+	  if (!zc_detected && !zc_pending)
 	  {
-		  if ((bemf_prev < half_bus) && (bemf_filtered >= half_bus))
-		  {
-			  // rising
-			  zc_detected = 1;
-		  }
-		  if ((bemf_prev > half_bus) && (bemf_filtered <= half_bus))
-		  {
-			  // falling
-			  zc_detected = 1;
-		  }
+	      if ((bemf_prev < half_bus_l && bemf_filtered >= half_bus_h) ||
+	          (bemf_prev > half_bus_h && bemf_filtered <= half_bus_l))
+	      {
+	          // possible ZC, start validation window
+	          zc_pending = 1;
+	          zc_timer_start = TIM7->CNT;
+	      }
+	  }
+
+	  if (zc_pending)
+	  {
+	      uint32_t elapsed = (TIM7->CNT >= zc_timer_start)
+	                         ? (TIM7->CNT - zc_timer_start)
+	                         : (0xFFFF - zc_timer_start + TIM7->CNT + 1);
+
+	      // 16us is 2720 + 170(1us) = 2860
+	      x = (motorSpeedCurrent* 2720 / 1024);
+	      if (elapsed >= 1024)
+	      {
+	          // validation time expired, confirm stable
+	          zc_detected = 1;
+	          zc_pending = 0;
+	      }
+	      else
+	      {
+	          // if crossing reverted, cancel
+	          if ((bemf_prev < half_bus_l && bemf_filtered < half_bus_l) ||
+	              (bemf_prev > half_bus_h && bemf_filtered > half_bus_h))
+	          {
+	              zc_pending = 0;
+	          }
+	      }
 	  }
 	  bemf_prev = bemf_filtered;
 
@@ -557,11 +621,6 @@ int main(void)
 	          HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1); // enable OC interrupt
 	          zc_detected = 0;
 	      }
-	  }
-
-	  if ( do_commutate )
-	  {
-		  commutate();
 	  }
 
     /* USER CODE END WHILE */
