@@ -26,7 +26,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "stdio.h"
+#include "string.h"
+#include "stdarg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,8 +56,8 @@ typedef enum {
 // motor control
 #define dmaPulse  		1
 #define dmaPulseReload 	1023u
-#define BLANKING_US 	30u
-#define ZC_VALID_US 	10u
+#define BLANKING_US 	60u
+#define ZC_VALID_US 	5u
 #define ZC_HYST 		0.05f
 
 /* USER CODE END PD */
@@ -230,6 +232,29 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 								//===== USER FUNCTIONS =====//
 
+int _write(int file, char *ptr, int len)
+{
+  (void)file;
+  int DataIdx;
+
+  for (DataIdx = 0; DataIdx < len; DataIdx++)
+  {
+    ITM_SendChar(*ptr++);
+  }
+  return len;
+}
+
+void uart_printf(const char *fmt, ...)
+{
+    char buffer[128];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+}
+
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	if ( hadc == &hadc1 )
@@ -361,7 +386,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 }
 
 uint16_t startup_period = 10000;
-uint16_t min_startup_period = 1000;
+uint16_t min_startup_period = 5000;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if(htim->Instance == TIM6)
@@ -369,16 +394,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		commutate(); // Step the motor
 
 		// Gradually increase speed
-		if (motorSpeedCurrent < 600)
+		if (motorSpeedCurrent < 250)
 		{
-			motorSpeedCurrent += 10;
+			motorSpeedCurrent += 5;
 			setDutyCycle(motorSpeedCurrent);
 		}
 
 		// Decrease the period to speed up commutation
 		if (startup_period > min_startup_period)
 		{
-			startup_period -= 20;
+			startup_period -= 5;
 			__HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
 		}
     }
@@ -494,6 +519,8 @@ int main(void)
   __HAL_TIM_SET_COUNTER(&htim17, 0);
   HAL_TIM_Base_Start(&htim17);  // start free-running timer
 
+  MX_USART2_UART_Init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -531,7 +558,7 @@ int main(void)
 			if (motor_state_prev != MOTOR_STATE_STARTUP)
 			{
 				startup_period = 10000;
-				motorSpeedCurrent = 200;
+				motorSpeedCurrent = 100;
 				setDutyCycle(motorSpeedCurrent);
 			    __HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
 				HAL_TIM_Base_Start_IT(&htim6);
@@ -564,27 +591,44 @@ int main(void)
 						  {
 							  motorSpeedCurrent = motorSpeed;
 						  }
-
-						  if (motorSpeedCurrent < 200)
-							  motorSpeedCurrent = 200;
 						  setDutyCycle(motorSpeedCurrent);
 					  }
 				  }
-
+					char phase = 0;
 				  switch(powerStep)
 				  {
-					  case 0: bemf = bemf_b_voltage; break;
-					  case 1: bemf = bemf_a_voltage; break;
-					  case 2: bemf = bemf_c_voltage; break;
-					  case 3: bemf = bemf_b_voltage; break;
-					  case 4: bemf = bemf_a_voltage; break;
-					  case 5: bemf = bemf_c_voltage; break;
+					  case 0:
+						  bemf = bemf_b_voltage;
+						  phase = 'b';
+						  break;
+					  case 1:
+						  bemf = bemf_a_voltage;
+						  phase = 'a';
+						  break;
+					  case 2:
+						  bemf = bemf_c_voltage;
+						  phase = 'c';
+						  break;
+					  case 3:
+						  bemf = bemf_b_voltage;
+						  phase = 'b';
+						  break;
+					  case 4:
+						  bemf = bemf_a_voltage;
+						  phase = 'a';
+						  break;
+					  case 5:
+						  bemf = bemf_c_voltage;
+						  phase = 'c';
+						  break;
 				  }
 
-				  bemf_filtered = 0.7f * bemf_filtered + 0.3f * bemf;
+				  bemf_filtered = bemf;//0.7f * bemf_filtered + 0.3f * bemf;
 				  half_bus = bus_voltage/2.0f;
 				  half_bus_l = half_bus - ZC_HYST*bus_voltage;
 				  half_bus_h = half_bus + ZC_HYST*bus_voltage;
+
+				  uart_printf("%c - %u - %.2f - %.2f \r\n", phase, blanking_active, bemf_filtered,  half_bus );
 
 				  // chill down for a bit after commutating.
 				  if (blanking_active) {
@@ -658,7 +702,9 @@ int main(void)
 				  }
 			break;
 		}
-	  }
+		default:
+			break;
+	  }	// end of motor state switch.
 
 
     /* USER CODE END WHILE */
