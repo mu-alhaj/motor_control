@@ -57,7 +57,7 @@ typedef enum {
 #define dmaPulse  		1
 #define dmaPulseReload 	1023u
 #define BLANKING_US 	60u
-#define ZC_VALID_US 	5u
+#define ZC_VALID_US 	2u
 #define ZC_HYST 		0.05f
 
 /* USER CODE END PD */
@@ -89,6 +89,10 @@ uint16_t bemf_c_raw = 0;
 float bemf_a_voltage = 0;
 float bemf_b_voltage = 0;
 float bemf_c_voltage = 0;
+
+float bemf_a_voltage_i = 0;
+float bemf_b_voltage_i = 0;
+float bemf_c_voltage_i = 0;
 
 uint16_t adc1_buffer[2] = {0};
 uint16_t adc2_buffer[3] = {0};
@@ -255,6 +259,16 @@ void uart_printf(const char *fmt, ...)
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
 
+
+/*
+ * step		0	1	2	3	4	5
+ * H		A 	B -	B	C	C	A
+			  /   	  \
+ * O		B 	A 	C 	B 	A	C
+						  \
+ * L		C	C 	A 	A 	B -	B
+ * */
+uint32_t blk_cnt = 100;
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
 	if ( hadc == &hadc1 )
@@ -262,11 +276,19 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		// CH11: POTENTIOMETER
 		// CH14: BEMFC
 		poten_raw = adc1_buffer[0];
-		bemf_c_raw = adc1_buffer[1];
-		bemf_c_voltage =(bemf_c_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
-		bemf_c_voltage = bemf_c_voltage/BEMF_DIV_RATIO;
 		// to avoid filtering in interrupt context.
 		do_filter = 1;
+//		if(powerStep == 2 || powerStep == 5)
+//		{
+//			if ( TIM1->CNT > motorSpeedCurrent + blk_cnt )
+//			{
+//				// 10 counts after the pwm went down
+//				bemf_c_raw = adc1_buffer[1];
+//				bemf_c_voltage =(bemf_c_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+//				bemf_c_voltage = bemf_c_voltage/BEMF_DIV_RATIO;
+//			}
+//		}
+
 	}
 	else if( hadc == &hadc2 )
 	{
@@ -277,14 +299,47 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 		bus_voltage = (bus_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
 		bus_voltage = bus_voltage/BUS_DIV_RATIO;
 
-		bemf_b_raw = adc2_buffer[1];
-		bemf_b_voltage =(bemf_b_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
-		bemf_b_voltage = bemf_b_voltage/BEMF_DIV_RATIO;
-
-		bemf_a_raw = adc2_buffer[2];
-		bemf_a_voltage =(bemf_a_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
-		bemf_a_voltage = bemf_a_voltage/BEMF_DIV_RATIO;
+//		if(powerStep == 0 || powerStep == 3)
+//		{
+//			if ( TIM1->CNT > motorSpeedCurrent + blk_cnt )
+//			{
+//				// 10 counts after the pwm went down
+//				bemf_b_raw = adc2_buffer[1];
+//				bemf_b_voltage =(bemf_b_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+//				bemf_b_voltage = bemf_b_voltage/BEMF_DIV_RATIO;
+//			}
+//		}
+//		if(powerStep == 1 || powerStep == 4)
+//		{
+//			if ( TIM1->CNT > motorSpeedCurrent + blk_cnt )
+//			{
+//				// 10 counts after the pwm went down
+//				bemf_a_raw = adc2_buffer[2];
+//				bemf_a_voltage =(bemf_a_raw/ADC_FULL_SCALE) * VDDA_VOLTS;
+//				bemf_a_voltage = bemf_a_voltage/BEMF_DIV_RATIO;
+//			}
+//		}
 	}
+}
+
+void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if(hadc == &hadc1)
+    {
+    	// CH14: BEMFC
+        uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
+        bemf_c_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    }
+    if(hadc == &hadc2)
+    {
+    	// CH5: BEMFB
+        uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
+        bemf_b_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+
+        // CH17: BEMFA
+        raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_2);
+		bemf_a_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    }
 }
 
 // filter and normalize
@@ -311,12 +366,14 @@ void setDutyCycle(uint16_t dc)
 
 	dmaBuffer[0] = dc;
 	TIM1->CCR1 = dc;
+
+	TIM1->CCR4 = motorSpeedCurrent + blk_cnt;
 }
 
 
 void commutate()
 {
-	__disable_irq();
+	//__disable_irq();
 
 	// got to next step
 	powerStep = (powerStep + 1)%6;
@@ -369,7 +426,7 @@ void commutate()
 	// reset tim6 for pumb motor.
 	TIM6->CNT = 0;
 
-	__enable_irq();
+	//__enable_irq();
 }
 
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
@@ -385,33 +442,18 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 	}
 }
 
-uint16_t startup_period = 10000;
-uint16_t min_startup_period = 5000;
+uint16_t startup_period = 5000;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    if(htim->Instance == TIM6)
-    {
-		commutate(); // Step the motor
-
-		// Gradually increase speed
-		if (motorSpeedCurrent < 250)
-		{
-			motorSpeedCurrent += 5;
-			setDutyCycle(motorSpeedCurrent);
-		}
-
-		// Decrease the period to speed up commutation
-		if (startup_period > min_startup_period)
-		{
-			startup_period -= 5;
-			__HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
-		}
-    }
+	if(htim->Instance == TIM6)
+	{
+		commutate();
+		__HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
+	}
 }
 
-
+uint32_t debounce_delay = 600;
 uint32_t last_button_press = 0;
-const uint32_t debounce_delay = 1000; // milliseconds
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 
@@ -422,12 +464,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         {
             last_button_press = now;
 
-            if (motor_state == MOTOR_STATE_IDLE)
-                motor_state = MOTOR_STATE_STARTUP;
-            else if (motor_state == MOTOR_STATE_STARTUP)
-                motor_state = MOTOR_STATE_SENSORLESS;
-            else
-            	motor_state = MOTOR_STATE_IDLE;
+            commutate();
         }
     }
 
@@ -489,6 +526,9 @@ int main(void)
   HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
   HAL_ADC_Start_DMA(&hadc2, (uint32_t*)adc2_buffer, 3);
 
+  HAL_ADCEx_InjectedStart_IT(&hadc1);
+  HAL_ADCEx_InjectedStart_IT(&hadc2);
+
   if( HAL_TIM_Base_Start(&htim7) != HAL_OK)
 	  Error_Handler();
   if( HAL_TIM_Base_Start(&htim1) != HAL_OK)
@@ -520,7 +560,11 @@ int main(void)
   HAL_TIM_Base_Start(&htim17);  // start free-running timer
 
   MX_USART2_UART_Init();
+  setDutyCycle(200);
 
+  uint16_t startup_period = 5000;
+  //__HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
+  //HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -536,176 +580,122 @@ int main(void)
   uint32_t zc_period = 0;      // time between zero crossings
   uint8_t zc_pending = 0;
   uint32_t zc_timer_start = 0;
+  uint8_t rising = 0;
   while (1)
   {
-	  switch (motor_state)
+	  if( do_filter )
 	  {
-		case MOTOR_STATE_IDLE:
-		{
-			if (motor_state_prev != MOTOR_STATE_IDLE)
-			{
-				// stop
-			    motorSpeedCurrent = 0;
-			    setDutyCycle(motorSpeedCurrent);
-			    HAL_TIM_Base_Stop_IT(&htim6);
+		  poten_filter_normalize();
+		  do_filter = 0;
+		  motorSpeed = poten_value;
 
-				motor_state_prev = motor_state;
-			}
-			break;
-		}
-		case MOTOR_STATE_STARTUP:
-		{
-			if (motor_state_prev != MOTOR_STATE_STARTUP)
-			{
-				startup_period = 10000;
-				motorSpeedCurrent = 100;
-				setDutyCycle(motorSpeedCurrent);
-			    __HAL_TIM_SET_AUTORELOAD(&htim6, startup_period);
-				HAL_TIM_Base_Start_IT(&htim6);
+		  if (motorSpeed != motorSpeedCurrent)
+		  {
+			  if ( (motorSpeed - motorSpeedCurrent) > 20)
+			  {
+				  motorSpeedCurrent += 20;
+			  }
+			  else
+			  {
+				  motorSpeedCurrent = motorSpeed;
+			  }
+			  setDutyCycle(motorSpeedCurrent);
+		  }
+	  }
 
-				motor_state_prev = motor_state;
-			}
+	  switch(powerStep)
+	  {
+		  case 0:
+			  bemf = bemf_b_voltage_i;
+			  break;
+		  case 1:
+			  bemf = bemf_a_voltage_i;
+			  break;
+		  case 2:
+			  bemf = bemf_c_voltage_i;
+			  break;
+		  case 3:
+			  bemf = bemf_b_voltage_i;
+			  break;
+		  case 4:
+			  bemf = bemf_a_voltage_i;
+			  break;
+		  case 5:
+			  bemf = bemf_c_voltage_i;
+			  break;
+	  }
+	//uart_printf("%c - %u - %.2f - %.2f \r\n", phase, blanking_active, bemf,  half_bus );
+	  bemf_filtered = bemf;//0.7f * bemf_filtered + 0.3f * bemf;
+	  half_bus = bus_voltage/2.0f;
+	  half_bus_l = half_bus - ZC_HYST*bus_voltage;
+	  half_bus_h = half_bus + ZC_HYST*bus_voltage;
 
-			break;
-		}
-		case MOTOR_STATE_SENSORLESS:
-		{
-			if (motor_state_prev != MOTOR_STATE_SENSORLESS)
-			{
-				HAL_TIM_Base_Stop_IT(&htim6);
-				motor_state_prev = motor_state;
-			}
-			if( do_filter )
-				  {
-					  poten_filter_normalize();
-					  do_filter = 0;
-					  motorSpeed = poten_value;
+	  // this zc detection logic needs alot of work.
+	  if (!zc_detected && !zc_pending)
+	  {
+		  if (bemf_prev < half_bus_l && bemf_filtered >= half_bus_h)
+		  {
+			  rising = 1;
+			  // possible ZC, start validation window
+			  zc_pending = 1;
+			  zc_timer_start = TIM7->CNT;
+		  }
+		  else if (bemf_prev > half_bus_h && bemf_filtered <= half_bus_l)
+		  {
+			  rising = 0;
+			  // possible ZC, start validation window
+			  zc_pending = 1;
+			  zc_timer_start = TIM7->CNT;
+		  }
+	  }
 
-					  if (motorSpeed != motorSpeedCurrent)
-					  {
-						  if ( (motorSpeed - motorSpeedCurrent) > 20)
-						  {
-							  motorSpeedCurrent += 20;
-						  }
-						  else
-						  {
-							  motorSpeedCurrent = motorSpeed;
-						  }
-						  setDutyCycle(motorSpeedCurrent);
-					  }
-				  }
-					char phase = 0;
-				  switch(powerStep)
-				  {
-					  case 0:
-						  bemf = bemf_b_voltage;
-						  phase = 'b';
-						  break;
-					  case 1:
-						  bemf = bemf_a_voltage;
-						  phase = 'a';
-						  break;
-					  case 2:
-						  bemf = bemf_c_voltage;
-						  phase = 'c';
-						  break;
-					  case 3:
-						  bemf = bemf_b_voltage;
-						  phase = 'b';
-						  break;
-					  case 4:
-						  bemf = bemf_a_voltage;
-						  phase = 'a';
-						  break;
-					  case 5:
-						  bemf = bemf_c_voltage;
-						  phase = 'c';
-						  break;
-				  }
+	  if (zc_pending)
+	  {
+		  uint32_t elapsed = (TIM7->CNT >= zc_timer_start)
+							 ? (TIM7->CNT - zc_timer_start)
+							 : (0xFFFF - zc_timer_start + TIM7->CNT + 1);
 
-				  bemf_filtered = bemf;//0.7f * bemf_filtered + 0.3f * bemf;
-				  half_bus = bus_voltage/2.0f;
-				  half_bus_l = half_bus - ZC_HYST*bus_voltage;
-				  half_bus_h = half_bus + ZC_HYST*bus_voltage;
+		  if (elapsed >= ZC_VALID_US*170u)
+		  {
+			  // validation time expired, confirm stable
+			  zc_detected = 1;
+			  zc_pending = 0;
+		  }
+		  else
+		  {
+			  // if crossing reverted, cancel
+			  if ( ((rising == 1) && bemf_filtered < half_bus_l) ||
+				   ((rising == 0) && bemf_filtered > half_bus_h))
+			  {
+				  zc_pending = 0;
+			  }
+		  }
+	  }
+	  bemf_prev = bemf_filtered;
 
-				  uart_printf("%c - %u - %.2f - %.2f \r\n", phase, blanking_active, bemf_filtered,  half_bus );
+	  if(zc_detected)
+	  {
+		  uint32_t zc_time = __HAL_TIM_GET_COUNTER(&htim17); // current time in µs
 
-				  // chill down for a bit after commutating.
-				  if (blanking_active) {
-				      uint32_t now = TIM7->CNT;
-				      uint32_t elapsed = (now >= blanking_start) ?
-				                         (now - blanking_start) :
-				                         (0xFFFF - blanking_start + now + 1);
-				      if (elapsed >= BLANKING_US * 170u)
-				          blanking_active = 0;
-				  }
-				  if (blanking_active)
-					  continue;
+		  // compute time between last zero crossing and current one
+		  if(zc_time_prev != 0)
+		  {
+			  // Compute period with overflow handling
+			  zc_period = (zc_time >= zc_time_prev) ? (zc_time - zc_time_prev)
+													  : (0xFFFF - zc_time_prev + zc_time + 1);
+		  }
+		  zc_time_prev = zc_time; // update for next ZC
 
-				  if (!zc_detected && !zc_pending)
-				  {
-				      if ((bemf_prev < half_bus_l && bemf_filtered >= half_bus_h) ||
-				          (bemf_prev > half_bus_h && bemf_filtered <= half_bus_l))
-				      {
-				          // possible ZC, start validation window
-				          zc_pending = 1;
-				          zc_timer_start = TIM7->CNT;
-				      }
-				  }
-
-				  if (zc_pending)
-				  {
-				      uint32_t elapsed = (TIM7->CNT >= zc_timer_start)
-				                         ? (TIM7->CNT - zc_timer_start)
-				                         : (0xFFFF - zc_timer_start + TIM7->CNT + 1);
-
-				      if (elapsed >= ZC_VALID_US*170u)
-				      {
-				          // validation time expired, confirm stable
-				          zc_detected = 1;
-				          zc_pending = 0;
-				      }
-				      else
-				      {
-				          // if crossing reverted, cancel
-				          if ((bemf_prev < half_bus_l && bemf_filtered < half_bus_l) ||
-				              (bemf_prev > half_bus_h && bemf_filtered > half_bus_h))
-				          {
-				              zc_pending = 0;
-				          }
-				      }
-				  }
-				  bemf_prev = bemf_filtered;
-
-				  if(zc_detected)
-				  {
-				      uint32_t zc_time = __HAL_TIM_GET_COUNTER(&htim17); // current time in µs
-
-				      // compute time between last zero crossing and current one
-				      if(zc_time_prev != 0)
-				      {
-				    	  // Compute period with overflow handling
-				    	  zc_period = (zc_time >= zc_time_prev) ? (zc_time - zc_time_prev)
-				    	                                          : (0xFFFF - zc_time_prev + zc_time + 1);
-				      }
-				      zc_time_prev = zc_time; // update for next ZC
-
-				      // start commutation slightly after zero crossing
-				      // for simplicity, we use half of the ZC period
-				      if(zc_period > 0)
-				      {
-				          uint32_t pulse = zc_time + (zc_period/4);
-				          __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, pulse & 0xFFFF);
-				          HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1); // enable OC interrupt
-				          zc_detected = 0;
-				      }
-				  }
-			break;
-		}
-		default:
-			break;
-	  }	// end of motor state switch.
-
+		  // start commutation slightly after zero crossing
+		  // for simplicity, we use half of the ZC period
+		  if(zc_period > 0)
+		  {
+			  uint32_t pulse = zc_time + (zc_period/4);
+			  __HAL_TIM_SET_COMPARE(&htim17, TIM_CHANNEL_1, pulse & 0xFFFF);
+			  HAL_TIM_OC_Start_IT(&htim17, TIM_CHANNEL_1); // enable OC interrupt
+			  zc_detected = 0;
+		  }
+	  }
 
     /* USER CODE END WHILE */
 

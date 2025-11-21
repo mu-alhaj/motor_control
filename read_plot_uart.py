@@ -1,80 +1,102 @@
 import serial
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 # ==========================
 # CONFIG
 # ==========================
 COM_PORT = 'COM8'
 BAUD_RATE = 921600
-LOG_FILE = 'esc_data_log.txt'
+MAX_POINTS = 500   # fixed width of x-axis
 
 # ==========================
-# RECORDING MODE
+# BUFFERS
 # ==========================
-def record_data():
-    ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-    print("Recording data. Press Ctrl+C to stop...")
-    with open(LOG_FILE, 'w') as f:
-        try:
-            while True:
-                line = ser.readline().decode(errors='ignore').strip()
-                if line:
-                    print(line)
-                    f.write(line + '\n')
-        except KeyboardInterrupt:
-            print("Recording stopped.")
-    ser.close()
+bemf = []
+half_bus = []
+blanking_sig = []
 
 # ==========================
-# PLAYBACK MODE
+# SERIAL INIT
 # ==========================
-def playback_data():
-    phases = []
-    blankings = []
-    bemf_filtered = []
-    half_bus = []
-
-    with open(LOG_FILE, 'r') as f:
-        for line in f:
-            try:
-                parts = line.split('-')
-                phase = parts[0].strip()
-                blanking = int(parts[1].strip())
-                bemf = float(parts[2].strip())
-                bus = float(parts[3].strip())
-
-                phases.append(phase)
-                blankings.append(blanking)
-                bemf_filtered.append(bemf)
-                half_bus.append(bus)
-            except:
-                continue
-
-    # Convert blanking to digital signal for visualization (3 when active, 0 when inactive)
-    blanking_digital = [3 if b else 0 for b in blankings]
-
-    # Plotting
-    fig, ax = plt.subplots(figsize=(10,6))
-    ax.plot(bemf_filtered, label='BEMF Filtered', color='blue')
-    ax.plot(half_bus, label='Half Bus Voltage', color='orange')
-    ax.step(range(len(blanking_digital)), blanking_digital, label='Blanking', color='red', where='post', linestyle='--')
-
-    ax.set_title('BEMF, Half Bus Voltage, and Blanking Signal')
-    ax.set_xlabel('Samples')
-    ax.set_ylabel('Voltage / BEMF')
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-    plt.show()
+ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
 
 # ==========================
-# MAIN
+# PLOT SETUP
 # ==========================
-if __name__ == "__main__":
-    mode = input("Record data (r) or playback (p)? ").strip().lower()
-    if mode == 'r':
-        record_data()
-    elif mode == 'p':
-        playback_data()
-    else:
-        print("Invalid mode. Choose 'r' or 'p'.")
+plt.style.use('ggplot')
+fig, ax = plt.subplots(figsize=(10,6))
+
+line_bemf,      = ax.plot([], [], label="BEMF Filtered")
+line_halfbus,   = ax.plot([], [], label="Half Bus Voltage")
+line_blanking,  = ax.step([], [], label="Blanking", where="post", linestyle="--")
+
+ax.set_title("Live ESC Data")
+ax.set_xlabel("Samples")
+ax.set_ylabel("Voltage / Signal")
+ax.legend()
+ax.grid(True)
+
+# FIXED HORIZONTAL RANGE
+ax.set_xlim(0, MAX_POINTS)
+
+# ==========================
+# UPDATE FUNCTION
+# ==========================
+def update(frame):
+    try:
+        line = ser.readline().decode(errors='ignore').strip()
+        if not line:
+            return line_bemf, line_halfbus, line_blanking
+
+        parts = line.split('-')
+        if len(parts) < 4:
+            return line_bemf, line_halfbus, line_blanking
+
+        phase = parts[0].strip()
+        blanking = int(parts[1].strip())
+        bemf_val = float(parts[2].strip())
+        bus_val = float(parts[3].strip())
+
+        # push into buffers
+        bemf.append(bemf_val)
+        half_bus.append(bus_val)
+        blanking_sig.append(3 if blanking else 0)
+
+        # keep buffers to MAX_POINTS
+        if len(bemf) > MAX_POINTS:
+            bemf.pop(0)
+            half_bus.pop(0)
+            blanking_sig.pop(0)
+
+        x = range(len(bemf))
+
+        # update line data
+        line_bemf.set_data(x, bemf)
+        line_halfbus.set_data(x, half_bus)
+        line_blanking.set_data(x, blanking_sig)
+
+        # only rescale Y axis
+        ax.set_ylim(
+            min(min(bemf), min(half_bus), min(blanking_sig)) - 0.1,
+            max(max(bemf), max(half_bus), max(blanking_sig)) + 0.1
+        )
+
+    except Exception:
+        pass
+
+    return line_bemf, line_halfbus, line_blanking
+
+# ==========================
+# ANIMATION LOOP
+# ==========================
+ani = animation.FuncAnimation(
+    fig,
+    update,
+    interval=1,
+    blit=False
+)
+
+plt.tight_layout()
+plt.show()
+ser.close()
