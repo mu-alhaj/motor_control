@@ -322,23 +322,39 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 	}
 }
 
+
+/*
+ * step		0	1	2	3	4	5
+ * H		A 	B  	B	C	C	A
+ * O		B 	A 	C 	B 	A	C
+ * L		C	C 	A 	A 	B  	B
+ * */
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc == &hadc1)
     {
     	// CH14: BEMFC
-        uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
-        bemf_c_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    	if (powerStep == 2 || powerStep == 5)
+    	{
+            uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
+            bemf_c_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    	}
     }
     if(hadc == &hadc2)
     {
     	// CH5: BEMFB
-        uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
-        bemf_b_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    	if (powerStep == 0 || powerStep == 3)
+    	{
+    		uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
+    		bemf_b_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+    	}
 
         // CH17: BEMFA
-        raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_2);
-		bemf_a_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+        if (powerStep == 1 || powerStep == 4)
+        {
+        	uint32_t raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_2);
+			bemf_a_voltage_i = (raw / ADC_FULL_SCALE) * VDDA_VOLTS / BEMF_DIV_RATIO;
+        }
     }
 }
 
